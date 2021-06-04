@@ -1,0 +1,622 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[1]:
+
+
+import pandas as pd
+from pandas import DataFrame
+from pandas import concat
+import numpy as np
+from numpy import asarray
+from numpy import mean
+from numpy import std
+from numpy import absolute
+from numpy import arange
+import matplotlib.pyplot as plt
+import eli5
+from eli5.sklearn import PermutationImportance
+import sklearn
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import RepeatedKFold
+from sklearn.model_selection import GridSearchCV
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error
+from sklearn.metrics import mean_absolute_error
+import xgboost
+from xgboost import XGBRegressor
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import optimizers
+from tensorflow.keras.optimizers import schedules
+from tensorflow.keras import metrics
+from tensorflow.python.keras.models import Sequential 
+from tensorflow.python.keras.layers import Dense 
+from tensorflow.python.keras.wrappers.scikit_learn import KerasRegressor
+from tensorflow.python.keras.layers import LSTM
+
+
+# In[2]:
+
+
+#The version of numpy must be checked here and the version must be early enough so as not to cause problems running the LSTM model.  Tensorflow for developing LSTMs is not compatible with later versions of numpy, e.g. 1.20.2.
+np.version.version
+
+
+# In[3]:
+
+
+#The version of tensorflow was checked initially b/c it seemed the later version of tensorflow was causing issues with a "shap" Python package that can be used for determining feature importance.  It turns out that it was, but downgrading tensorflow was problematic.  eli5 package used instead for feature importance.
+print(tf.__version__)
+
+
+# In[4]:
+
+
+import os; 
+path="C:/Hypo_Model2" 
+os.chdir(path) 
+os.getcwd()
+
+
+# In[5]:
+
+
+#This line of code establishes the first 15 columns in the csv as features and the last, 16th column as the output.
+dataset = np.loadtxt('FeaturesandOutputs_Cleaned_NoBlanks-Scaled_Final.csv', delimiter=',') 
+X = dataset[:,0:15] 
+y = dataset[:,15] 
+
+
+# In[6]:
+
+
+print(X)
+
+
+# In[7]:
+
+
+print(y)
+
+
+# In[8]:
+
+
+#The following models are developed in order of most complicated to simplest.
+
+
+# In[9]:
+
+
+#Begin with the LSTM model.
+
+
+# In[10]:
+
+
+#It's important in this line of code that shuffle=False b/c the data must stay in order since this is an LSTM model we are building.
+X_train_LSTM, X_test_LSTM, y_train_LSTM, y_test_LSTM = train_test_split(X, y, test_size = 0.2, shuffle=False)
+
+
+# In[11]:
+
+
+X_train_LSTM.shape
+
+
+# In[12]:
+
+
+X_test_LSTM.shape
+
+
+# In[13]:
+
+
+#This is code taken from https://machinelearningmastery.com/convert-time-series-supervised-learning-problem-python/ and converts features so that they have a history.  After running this code, the feature dataframe can be built for LSTM model development.
+def series_to_supervised(data, n_in=1, n_out=1, dropnan=True):
+    n_vars = 1 if type(data) is list else data.shape[1]
+    df = DataFrame(data)
+    cols, names = list(), list()
+    # input sequence (t-n, ... t-1)
+    for i in range(n_in, 0, -1):
+        cols.append(df.shift(i))
+        names += [('var%d(t-%d)' % (j+1, i)) for j in range(n_vars)]
+    # forecast sequence (t, t+1, ... t+n)
+    for i in range(0, n_out):
+        cols.append(df.shift(-i))
+        if i == 0:
+            names += [('var%d(t)' % (j+1)) for j in range(n_vars)]
+        else:
+            names += [('var%d(t+%d)' % (j+1, i)) for j in range(n_vars)]
+    # put it all together
+    agg = concat(cols, axis=1)
+    agg.columns = names
+    # drop rows with NaN values
+    if dropnan:
+        agg.dropna(inplace=True)
+    return agg
+
+
+# In[14]:
+
+
+#The "9" in this line of code allows us to look 9 time steps, or 9 minutes, back, providing for a total of 10 inputs per feature if the current time step is included.
+X_train_LSTM_reframed = series_to_supervised(X_train_LSTM, 9, 1)
+X_test_LSTM_reframed = series_to_supervised(X_test_LSTM, 9, 1)
+
+
+# In[15]:
+
+
+print(X_train_LSTM_reframed)
+
+
+# In[16]:
+
+
+print(X_test_LSTM_reframed)
+
+
+# In[17]:
+
+
+#By adding history to the features, the number of features went from 15 to 150.
+X_train_LSTM_reframed.shape
+
+
+# In[18]:
+
+
+X_test_LSTM_reframed.shape
+
+
+# In[19]:
+
+
+#The output datafromes could not directly be used following the "train_test_split" line of code b/c they needed to shift down 9 rows so that y(t) corresponded to varn(t).  Therefore, a new .csv was created for the outputs.
+y_train_dataset_LSTM = pd.read_csv('y_train_LSTM.csv') 
+y_train_dataset_LSTM.head()
+
+
+# In[20]:
+
+
+y_test_dataset_LSTM = pd.read_csv('y_test_LSTM.csv') 
+y_test_dataset_LSTM.head()
+
+
+# In[21]:
+
+
+y_train_LSTM_reframed = y_train_dataset_LSTM['col1'].values
+y_test_LSTM_reframed = y_test_dataset_LSTM['col1'].values
+
+
+# In[22]:
+
+
+print(y_train_LSTM_reframed)
+print(y_test_LSTM_reframed)
+
+
+# In[23]:
+
+
+#In this line of code, we are just confirming the same number of samples in the X and y dataframes.
+y_train_LSTM_reframed.shape
+
+
+# In[24]:
+
+
+y_test_LSTM_reframed.shape
+
+
+# In[25]:
+
+
+#A reshape cannot be done in the following line of code until the dataframes are converted to arrays.
+X_train_LSTM_array = np.array(X_train_LSTM_reframed)
+X_test_LSTM_array = np.array(X_test_LSTM_reframed)
+y_train_LSTM_array = np.array(y_train_LSTM_reframed)
+y_test_LSTM_array = np.array(y_test_LSTM_reframed)
+
+
+# In[26]:
+
+
+#Here, the 2-d X arrays are reshaped into 3-d arrays.
+X_train_LSTM_reshaped = X_train_LSTM_array.reshape((X_train_LSTM_array.shape[0], 1, X_train_LSTM_array.shape[1]))
+X_test_LSTM_reshaped = X_test_LSTM_array.reshape((X_test_LSTM_array.shape[0], 1, X_test_LSTM_array.shape[1]))
+
+
+# In[27]:
+
+
+#3-d shape confirmed.
+print(X_train_LSTM_reshaped.shape, y_train_LSTM_array.shape, X_test_LSTM_reshaped.shape, y_test_LSTM_array.shape)
+
+
+# In[28]:
+
+
+#The # of hidden neurons is equal to approximately 2x the # of feature neurons.  There is only one hidden layer.
+my_model_LSTM = Sequential()
+my_model_LSTM.add(LSTM(300, activation='relu', input_shape=(X_train_LSTM_reshaped.shape[1], X_train_LSTM_reshaped.shape[2])))
+my_model_LSTM.add(Dense(1))
+my_model_LSTM.compile(loss='mae', optimizer='adam')
+
+
+# In[74]:
+
+
+#It's important in this line of code that shuffle=False b/c the data must stay in order since this is an LSTM model we are building.
+my_model_LSTM.fit(X_train_LSTM_reshaped, y_train_LSTM_array, epochs=300, batch_size=5000, validation_data=(X_test_LSTM_reshaped, y_test_LSTM_array), shuffle=False)
+
+
+# In[29]:
+
+
+#Now, we RANDOMLY split the data into training and test sets for the remaining models.
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = 0.2, shuffle=True)
+
+
+# In[30]:
+
+
+#Develop the FeedForward Neural Network model
+
+
+# In[31]:
+
+
+#The # of hidden neurons is equal to approximately 2x the # of feature neurons.  There is only one hidden layer.
+my_model_FFNN = Sequential() 
+my_model_FFNN.add(Dense(30, input_dim=15, activation='relu')) 
+my_model_FFNN.add(Dense(1, activation='relu'))
+
+
+# In[32]:
+
+
+my_model_FFNN.compile(loss = "mae", optimizer = 'adam')
+
+
+# In[33]:
+
+
+my_model_FFNN.fit(X_train, y_train, epochs=300, batch_size=5000, validation_data=(X_test, y_test), shuffle=True)
+
+
+# In[34]:
+
+
+yhat_FFNN_train = my_model_FFNN.predict(X_train)
+yhat_FFNN_test = my_model_FFNN.predict(X_test)
+
+
+# In[35]:
+
+
+#The shape of the above 2 dataframes is not correct, so they must be flattened.
+yhat_FFNN_train_flattened = yhat_FFNN_train.flatten()
+yhat_FFNN_test_flattened = yhat_FFNN_test.flatten()
+
+
+# In[36]:
+
+
+mean_absolute_error_FFNN_train = sum(abs(yhat_FFNN_train_flattened-y_train))/len(y_train)
+mean_absolute_error_FFNN_test = sum(abs(yhat_FFNN_test_flattened-y_test))/len(y_test)
+
+
+# In[37]:
+
+
+print("%.4f" % mean_absolute_error_FFNN_train)
+print("%.4f" % mean_absolute_error_FFNN_test)
+
+
+# In[38]:
+
+
+#Develop the XGBoost model
+
+
+# In[39]:
+
+
+#This line of code needs to be considered with the line of code two lines down beginning with "scores_XGB".
+#This is a repeated k-fold cross validation.  The training set of data is split into 5 equally-sized and smaller data sets.  Then, the model is fit on k-1 of the smaller data sets and validated against the remaining data set.  This process is repeated with the same 5 folds 5 times, so that each fold can serve as the validation set one time.  Then, the data is shuffled and the process is repeated again, and then reshuffled and repated again, for a total of 3 "repeats".
+cv_XGB = RepeatedKFold(n_splits=5, n_repeats=3, random_state=None)
+
+
+# In[40]:
+
+
+my_model_XGB = XGBRegressor(objective='reg:squarederror')
+
+
+# In[41]:
+
+
+scores_XGB = cross_val_score(my_model_XGB, X_train, y_train, scoring='neg_mean_absolute_error', cv=cv_XGB, n_jobs=-1, error_score='raise')
+
+
+# In[42]:
+
+
+#MAE defaults to negative in python.  Absolute value is taken here for ease of viewing.
+abs_scores_XGB = absolute(scores_XGB)
+
+
+# In[43]:
+
+
+print('Mean MAE: %.4f (%.4f)' % (mean(abs_scores_XGB), std(abs_scores_XGB)))
+
+
+# In[44]:
+
+
+#Since XGBoost is the best performer, let's do hyperparameter tuning.  We will do it on a subset of data that's only 2000 observations due to the computational demand.  The 2000 observations are randomly selected.
+dataset = np.loadtxt('XGB_Param_Tuning.csv', delimiter=',') 
+X_param_tuning = dataset[:,0:15] 
+y_param_tuning = dataset[:,15]
+
+
+# In[45]:
+
+
+#This is the list of hyperparameters for tuning.
+param_tuning = {
+        'learning_rate': [0.1, 0.5],
+        'max_depth': [3, 5, 7, 10],
+        'min_child_weight': [1, 3, 5],
+        'subsample': [0.5, 0.7, 1],
+        'colsample_bytree': [0.5, 0.7, 1],
+        'n_estimators' : [100, 200, 500],
+        'objective': ['reg:squarederror']
+    }
+
+
+# In[46]:
+
+
+my_model_XGB_paramtuning = XGBRegressor()
+
+
+# In[47]:
+
+
+gsearch = GridSearchCV(estimator = my_model_XGB_paramtuning, param_grid = param_tuning, cv = 3, n_jobs = -1, verbose = 1)
+
+
+# In[48]:
+
+
+gsearch.fit(X_param_tuning,y_param_tuning)
+
+
+# In[49]:
+
+
+print(gsearch.best_params_) 
+
+
+# In[50]:
+
+
+my_model_XGB_tuned = XGBRegressor(
+    objective='reg:squarederror', 
+    colsample_bytree = 1, 
+    learning_rate = 0.1, 
+    max_depth = 5, 
+    min_child_weight = 5, 
+    n_estimators = 500, 
+    subsample = 1)
+
+
+# In[51]:
+
+
+#Now, we fit the model on the entire training set without folds and use the tuned parameters.
+my_model_XGB_tuned.fit(X_train, y_train)
+
+
+# In[52]:
+
+
+yhat_XGB_train = my_model_XGB_tuned.predict(X_train)
+yhat_XGB_test = my_model_XGB_tuned.predict(X_test)
+
+
+# In[53]:
+
+
+mean_absolute_error_XGB_train = sum(abs(yhat_XGB_train-y_train))/len(y_train)
+mean_absolute_error_XGB_test = sum(abs(yhat_XGB_test-y_test))/len(y_test)
+
+
+# In[54]:
+
+
+print("%.4f" % mean_absolute_error_XGB_train)
+print("%.4f" % mean_absolute_error_XGB_test)
+
+
+# In[55]:
+
+
+#This is the feature importance algorithm.  One at a time, a single feature in the test data set is randomly shuffled while the other features maintain their original order consistent with y(t).  If shuffling a feature's values has a significant impact on the model's accuracy, then it's deemed important and vice-versa.
+#0 = time-of-day
+#1 = TOC
+#2 = NHx
+#3 = NO2
+#4 = UVT-254
+#5 = Turbidity
+#6 = TN
+#7 = NO3
+#8 = pH
+#9 = Conductivity
+#10 = O3 Dose
+#11 = Temp
+#12 = Flow
+#13 = Supplemental NHx
+#14 = 30-min TRC
+perm = PermutationImportance(my_model_XGB_tuned, scoring='neg_mean_squared_error', cv='prefit').fit(X_test, y_test) 
+eli5.show_weights(perm)
+
+
+# In[56]:
+
+
+#Predict hypo dosage based on X, where data is chronological and not shuffled.  X is the complete data set, not split for training and test sets.
+yhat_XGB_print_realTRCs = my_model_XGB_tuned.predict(X)
+
+
+# In[57]:
+
+
+#Save observed and predicted hypo dosages, both having data that is chronological and not shuffled.  y is the complete data set, not split for training and test sets.
+np.savetxt('y.csv', y, delimiter=',')
+np.savetxt('yhat_XGB_print_realTRCs.csv', yhat_XGB_print_realTRCs, delimiter=',')
+
+
+# In[58]:
+
+
+#Save X, the feature data set, not split for training and test sets. Separately, in the csv, fix the 30-min TRC feature values so they all equal 0.75 mg/L and Save As "X_fixed30-minTRCatpoint75".
+np.savetxt('X.csv', X, delimiter=',')
+
+
+# In[62]:
+
+
+#Bring in the new feature data set from above.
+dataset = np.loadtxt('X_fixed30-minTRCatpoint75.csv', delimiter=',') 
+X_scenario = dataset[:,0:15] 
+
+
+# In[63]:
+
+
+#Predict hypo dosage based on X_scenario.  Ideally, the predicted hypo dosages are lower than observed when observed 30-min TRCs are > 0.75 mg/L.
+yhat_XGB_print_scenarioTRCs = my_model_XGB_tuned.predict(X_scenario)
+
+
+# In[64]:
+
+
+#Save predicted hypo dosages based on X_scenario.
+np.savetxt('yhat_XGB_print_scenarioTRCs.csv', yhat_XGB_print_scenarioTRCs, delimiter=',')
+
+
+# In[65]:
+
+
+#Develop the Random Forest model
+
+
+# In[66]:
+
+
+#This line of code needs to be considered with the line of code two lines down beginning with "scores_RF".
+#This is a repeated k-fold cross validation.  The training set of data is split into 5 equally-sized and smaller data sets.  Then, the model is fit on k-1 of the smaller data sets and validated against the remaining data set.  This process is repeated with the same 5 folds 5 times, so that each fold can serve as the validation set one time.  Then, the data is shuffled and the process is repeated again, and then reshuffled and repated again, for a total of 3 "repeats".
+cv_RF = RepeatedKFold(n_splits=5, n_repeats=3, random_state=None)
+
+
+# In[67]:
+
+
+my_model_RF = RandomForestRegressor(max_depth=6)
+
+
+# In[75]:
+
+
+scores_RF = cross_val_score(my_model_RF, X_train, y_train, scoring='neg_mean_absolute_error', cv=cv_RF, n_jobs=-1, error_score='raise')
+
+
+# In[76]:
+
+
+#MAE defaults to negative in python.  Absolute value is taken here for ease of viewing.
+abs_scores_RF = absolute(scores_RF)
+
+
+# In[77]:
+
+
+print('Mean MAE: %.4f (%.4f)' % (mean(abs_scores_RF), std(abs_scores_RF)))
+
+
+# In[78]:
+
+
+my_model_RF.fit(X_train, y_train)
+
+
+# In[79]:
+
+
+yhat_RF_train = my_model_RF.predict(X_train)
+yhat_RF_test = my_model_RF.predict(X_test)
+
+
+# In[80]:
+
+
+mean_absolute_error_RF_train = sum(abs(yhat_RF_train-y_train))/len(y_train)
+mean_absolute_error_RF_test = sum(abs(yhat_RF_test-y_test))/len(y_test)
+
+
+# In[81]:
+
+
+print("%.4f" % mean_absolute_error_RF_train)
+print("%.4f" % mean_absolute_error_RF_test)
+
+
+# In[68]:
+
+
+#Develop the Linear Regression model
+
+
+# In[69]:
+
+
+my_model_lr = LinearRegression()
+
+
+# In[70]:
+
+
+my_model_lr.fit(X_train,y_train)
+
+
+# In[71]:
+
+
+yhat_lr_train = my_model_lr.predict(X_train)
+yhat_lr_test = my_model_lr.predict(X_test)
+
+
+# In[72]:
+
+
+mean_absolute_error_lr_train = sum(abs(yhat_lr_train-y_train))/len(y_train)
+mean_absolute_error_lr_test = sum(abs(yhat_lr_test-y_test))/len(y_test)
+
+
+# In[73]:
+
+
+print("%.4f" % mean_absolute_error_lr_train)
+print("%.4f" % mean_absolute_error_lr_test)
+
